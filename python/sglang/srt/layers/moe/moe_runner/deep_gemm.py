@@ -923,12 +923,11 @@ def _varlen_deep_gemm_silu_mul_quant(
         if packed_ue8m0:
             down_input_scale = down_input_scale.transpose(-1, -2)
     else:
-        # Triton fallback: apply swiglu_limit in-place, then SiLU+Mul+Quant
+        # Triton fallback: apply swiglu_limit before SiLU+Mul+Quant.
+        # Use single full-tensor clamp instead of per-half slice clamp to
+        # avoid 2x non-contiguous elementwise kernels (~5ms/step overhead).
         if swiglu_limit is not None:
-            orig_shape = gateup_output.shape
-            gateup_output = gateup_output.view(-1, orig_shape[-1])
-            _apply_swiglu_limit(gateup_output, swiglu_limit)
-            gateup_output = gateup_output.view(orig_shape)
+            gateup_output.clamp_(-swiglu_limit, swiglu_limit)
         down_input_scale = torch.empty(
             (E, N, G),
             device=hidden_states_device,
