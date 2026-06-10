@@ -434,10 +434,10 @@ class DeepGemmRunnerCore(MoeRunnerCore):
                 not _MASKED_GEMM_FAST_ACT
             ), "DeepSeek V4 does not support SGLANG_MASKED_GEMM_FAST_ACT"
 
-            # When JIT EP activation can run (hidden_dim/8 >= num_experts),
-            # use fused swiglu_limit path. Otherwise, pass swiglu_limit
-            # through to _varlen_deep_gemm_silu_mul_quant which handles the
-            # fallback (separate clamp + Triton SiLU+Mul+Quant).
+            # JIT EP activation kernel requires num_threads (hidden_dim/8) >= num_experts.
+            # At TP>=2 on DSv4 (hidden=7168, experts=256), hidden/TP/8 < 256 → crash.
+            # Fall back to Triton silu_mul_quant when shape doesn't fit.
+
             E_check, _, D2_check = gateup_output.shape
             can_use_jit = (
                 envs.SGLANG_OPT_USE_JIT_EP_ACTIVATION.get()
@@ -457,8 +457,9 @@ class DeepGemmRunnerCore(MoeRunnerCore):
                     gateup_output, "(grp tok) hidden -> grp tok hidden", grp=num_groups
                 )
             else:
-                # JIT kernel can't handle this shape; let the quant
-                # function apply swiglu_limit in its Triton fallback.
+
+                # Triton fallback for shapes where JIT kernel can't run
+
                 swiglu_limit_arg = self.swiglu_limit
 
         # Act
@@ -896,9 +897,10 @@ def _varlen_deep_gemm_silu_mul_quant(
     use_jit_ep_activation = envs.SGLANG_OPT_USE_JIT_EP_ACTIVATION.get()
     if N % 4 != 0 or G % 4 != 0:
         use_jit_ep_activation = False
-    # JIT kernel requires num_threads (D//8) >= num_experts (E).
-    # On SM120 with TP>=2, hidden_dim is too small (e.g. TP=4: 512/8=64 < 256).
-    if use_jit_ep_activation and D // 8 < E:
+
+    # SM120 TP>=2: hidden_dim/8 < num_experts → JIT kernel crash
+    if use_jit_ep_activation and (D // 8) < E:
+
         use_jit_ep_activation = False
 
     if use_jit_ep_activation:
@@ -923,11 +925,9 @@ def _varlen_deep_gemm_silu_mul_quant(
         if packed_ue8m0:
             down_input_scale = down_input_scale.transpose(-1, -2)
     else:
-        # Triton fallback: apply swiglu_limit before SiLU+Mul+Quant.
-        # Use single full-tensor clamp instead of per-half slice clamp to
-        # avoid 2x non-contiguous elementwise kernels (~5ms/step overhead).
-        if swiglu_limit is not None:
-            gateup_output.clamp_(-swiglu_limit, swiglu_limit)
+
+        # Triton fallback: pass swiglu_limit into kernel (fused clamp+silu+quant)
+
         down_input_scale = torch.empty(
             (E, N, G),
             device=hidden_states_device,
@@ -940,6 +940,7 @@ def _varlen_deep_gemm_silu_mul_quant(
             group_size,
             masked_m,
             scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+            swiglu_limit=swiglu_limit if swiglu_limit is not None else 0.0,
         )
         # Convert fp32 scales to packed int32 UE8M0 if needed by DeepGEMM
         if deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0:
