@@ -306,6 +306,7 @@ def _silu_and_mul_post_quant_kernel(
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    SWIGLU_LIMIT: tl.constexpr = 0.0,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -342,6 +343,10 @@ def _silu_and_mul_post_quant_kernel(
             mask=offs_in_d < size_n,
             other=0.0,
         )
+        # Fused swiglu_limit clamp (avoids separate elementwise kernel)
+        if SWIGLU_LIMIT > 0.0:
+            gate = tl.clamp(gate, -SWIGLU_LIMIT, SWIGLU_LIMIT)
+            up = tl.clamp(up, -SWIGLU_LIMIT, SWIGLU_LIMIT)
         gate = gate / (1 + tl.exp(-gate))
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
@@ -370,6 +375,7 @@ def silu_and_mul_masked_post_quant_fwd(
     quant_group_size: int,
     masked_m: torch.Tensor,
     scale_ue8m0: bool = False,
+    swiglu_limit: float = 0.0,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -427,6 +433,7 @@ def silu_and_mul_masked_post_quant_fwd(
         NUM_STAGE=NUM_STAGES,
         num_warps=num_warps,
         SCALE_UE8M0=scale_ue8m0,
+        SWIGLU_LIMIT=swiglu_limit,
     )
     return
 
