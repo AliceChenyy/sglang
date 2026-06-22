@@ -2078,7 +2078,8 @@ class ServerArgs:
                 envs.SGLANG_OPT_USE_TOPK_V2.set(False)
                 envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.set(False)
                 envs.SGLANG_OPT_DEEPGEMM_HC_PRENORM.set(False)
-                envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.set(True)
+                # SM120 CUDA paged MQA kernel works; torch fallback adds ~10ms TPOT.
+                # envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.set(True)
 
         elif model_arch in ["GptOssForCausalLM"]:
             # Set attention backend for GPT-OSS
